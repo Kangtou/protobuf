@@ -50,6 +50,7 @@ from google.protobuf import struct_pb2
 from google.protobuf import timestamp_pb2
 from google.protobuf import wrappers_pb2
 from google.protobuf import unittest_mset_pb2
+from google.protobuf import unittest_pb2
 from google.protobuf.internal import well_known_types
 from google.protobuf import json_format
 from google.protobuf.util import json_format_proto3_pb2
@@ -159,15 +160,15 @@ class JsonFormatTest(JsonFormatBase):
     json_format.Parse(text, parsed_message)
     self.assertEqual(message, parsed_message)
 
-  def testUnknownEnumToJsonError(self):
+  def testUnknownEnumToJsonAndBack(self):
+    text = '{\n  "enumValue": 999\n}'
     message = json_format_proto3_pb2.TestMessage()
     message.enum_value = 999
-    # TODO(jieluo): should accept numeric unknown enum for proto3.
-    with self.assertRaises(json_format.SerializeToJsonError) as e:
-      json_format.MessageToJson(message)
-    self.assertEqual(str(e.exception),
-                     'Enum field contains an integer value which can '
-                     'not mapped to an enum value.')
+    self.assertEqual(json_format.MessageToJson(message),
+                     text)
+    parsed_message = json_format_proto3_pb2.TestMessage()
+    json_format.Parse(text, parsed_message)
+    self.assertEqual(message, parsed_message)
 
   def testExtensionToJsonAndBack(self):
     message = unittest_mset_pb2.TestMessageSetContainer()
@@ -494,6 +495,8 @@ class JsonFormatTest(JsonFormatBase):
     message.value['email'] = None
     message.value.get_or_create_struct('address')['city'] = 'SFO'
     message.value['address']['house_number'] = 1024
+    message.value.get_or_create_struct('empty_struct')
+    message.value.get_or_create_list('empty_list')
     struct_list = message.value.get_or_create_list('list')
     struct_list.extend([6, 'seven', True, False, None])
     struct_list.add_struct()['subkey2'] = 9
@@ -508,6 +511,8 @@ class JsonFormatTest(JsonFormatBase):
             '      "city": "SFO", '
             '      "house_number": 1024'
             '    }, '
+            '    "empty_struct": {}, '
+            '    "empty_list": [], '
             '    "age": 10, '
             '    "name": "Jim", '
             '    "attend": true, '
@@ -518,6 +523,8 @@ class JsonFormatTest(JsonFormatBase):
             '}'))
     parsed_message = json_format_proto3_pb2.TestStruct()
     self.CheckParseBack(message, parsed_message)
+    parsed_message.value['empty_struct']  # check for regression; this used to raise
+    parsed_message.value['empty_list']
 
   def testValueMessage(self):
     message = json_format_proto3_pb2.TestValue()
@@ -757,11 +764,16 @@ class JsonFormatTest(JsonFormatBase):
         '{"enumValue": "baz"}',
         'Failed to parse enumValue field: Invalid enum value baz '
         'for enum type proto3.EnumType.')
-    # TODO(jieluo): fix json format to accept numeric unknown enum for proto3.
-    self.CheckError(
-        '{"enumValue": 12345}',
-        'Failed to parse enumValue field: Invalid enum value 12345 '
-        'for enum type proto3.EnumType.')
+    # Proto3 accepts numeric unknown enums.
+    text = '{"enumValue": 12345}'
+    json_format.Parse(text, message)
+    # Proto2 does not accept unknown enums.
+    message = unittest_pb2.TestAllTypes()
+    self.assertRaisesRegexp(
+        json_format.ParseError,
+        'Failed to parse optionalNestedEnum field: Invalid enum value 12345 '
+        'for enum type protobuf_unittest.TestAllTypes.NestedEnum.',
+        json_format.Parse, '{"optionalNestedEnum": 12345}', message)
 
   def testParseBadIdentifer(self):
     self.CheckError('{int32Value: 1}',
@@ -785,9 +797,6 @@ class JsonFormatTest(JsonFormatBase):
     json_format.Parse(text, parsed_message, ignore_unknown_fields=True)
 
   def testDuplicateField(self):
-    # Duplicate key check is not supported for python2.6
-    if sys.version_info < (2, 7):
-      return
     self.CheckError('{"int32Value": 1,\n"int32Value":2}',
                     'Failed to load JSON: duplicate key int32Value.')
 
@@ -976,6 +985,18 @@ class JsonFormatTest(JsonFormatBase):
     message.int32_value = 12345
     self.assertEqual('{\n"int32Value": 12345\n}',
                      json_format.MessageToJson(message, indent=0))
+
+  def testFormatEnumsAsInts(self):
+    message = json_format_proto3_pb2.TestMessage()
+    message.enum_value = json_format_proto3_pb2.BAR
+    message.repeated_enum_value.append(json_format_proto3_pb2.FOO)
+    message.repeated_enum_value.append(json_format_proto3_pb2.BAR)
+    self.assertEqual(json.loads('{\n'
+                                '  "enumValue": 1,\n'
+                                '  "repeatedEnumValue": [0, 1]\n'
+                                '}\n'),
+                     json.loads(json_format.MessageToJson(
+                         message, use_integers_for_enums=True)))
 
   def testParseDict(self):
     expected = 12345

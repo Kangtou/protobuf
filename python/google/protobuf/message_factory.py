@@ -39,9 +39,18 @@ my_proto_instance = message_classes['some.proto.package.MessageName']()
 
 __author__ = 'matthewtoia@google.com (Matt Toia)'
 
+from google.protobuf.internal import api_implementation
 from google.protobuf import descriptor_pool
 from google.protobuf import message
-from google.protobuf import reflection
+
+if api_implementation.Type() == 'cpp':
+  from google.protobuf.pyext import cpp_message as message_impl
+else:
+  from google.protobuf.internal import python_message as message_impl
+
+
+# The type of all Message classes.
+_GENERATED_PROTOCOL_MESSAGE_TYPE = message_impl.GeneratedProtocolMessageType
 
 
 class MessageFactory(object):
@@ -70,11 +79,11 @@ class MessageFactory(object):
       descriptor_name = descriptor.name
       if str is bytes:  # PY2
         descriptor_name = descriptor.name.encode('ascii', 'ignore')
-      result_class = reflection.GeneratedProtocolMessageType(
+      result_class = _GENERATED_PROTOCOL_MESSAGE_TYPE(
           descriptor_name,
           (message.Message,),
           {'DESCRIPTOR': descriptor, '__module__': None})
-          # If module not set, it wrongly points to the reflection.py module.
+      # If module not set, it wrongly points to message_factory module.
       self._classes[descriptor] = result_class
       for field in descriptor.fields:
         if field.message_type:
@@ -130,13 +139,22 @@ def GetMessages(file_protos):
   """Builds a dictionary of all the messages available in a set of files.
 
   Args:
-    file_protos: A sequence of file protos to build messages out of.
+    file_protos: Iterable of FileDescriptorProto to build messages out of.
 
   Returns:
     A dictionary mapping proto names to the message classes. This will include
     any dependent messages as well as any messages defined in the same file as
     a specified message.
   """
-  for file_proto in file_protos:
+  # The cpp implementation of the protocol buffer library requires to add the
+  # message in topological order of the dependency graph.
+  file_by_name = {file_proto.name: file_proto for file_proto in file_protos}
+  def _AddFile(file_proto):
+    for dependency in file_proto.dependency:
+      if dependency in file_by_name:
+        # Remove from elements to be visited, in order to cut cycles.
+        _AddFile(file_by_name.pop(dependency))
     _FACTORY.pool.Add(file_proto)
+  while file_by_name:
+    _AddFile(file_by_name.popitem()[1])
   return _FACTORY.GetMessages([file_proto.name for file_proto in file_protos])

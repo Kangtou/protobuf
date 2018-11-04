@@ -77,8 +77,11 @@ public abstract class CodedInputStream {
     return newInstance(input, DEFAULT_BUFFER_SIZE);
   }
 
-  /** Create a new CodedInputStream wrapping the given InputStream. */
-  static CodedInputStream newInstance(final InputStream input, int bufferSize) {
+  /** Create a new CodedInputStream wrapping the given InputStream, with a specified buffer size. */
+  public static CodedInputStream newInstance(final InputStream input, int bufferSize) {
+    if (bufferSize <= 0) {
+      throw new IllegalArgumentException("bufferSize must be > 0");
+    }
     if (input == null) {
       // TODO(nathanmittler): Ideally we should throw here. This is done for backward compatibility.
       return newInstance(EMPTY_BYTE_ARRAY);
@@ -130,7 +133,7 @@ public abstract class CodedInputStream {
 
   /** Create a new CodedInputStream wrapping the given byte array slice. */
   public static CodedInputStream newInstance(final byte[] buf, final int off, final int len) {
-    return newInstance(buf, off, len, false /* bufferIsImmutable */);
+    return newInstance(buf, off, len, /* bufferIsImmutable= */ false);
   }
 
   /** Create a new CodedInputStream wrapping the given byte array slice. */
@@ -166,7 +169,7 @@ public abstract class CodedInputStream {
    * trying to alter the ByteBuffer's status.
    */
   public static CodedInputStream newInstance(ByteBuffer buf) {
-    return newInstance(buf, false /* bufferIsImmutable */);
+    return newInstance(buf, /* bufferIsImmutable= */ false);
   }
 
   /** Create a new CodedInputStream wrapping the given buffer. */
@@ -410,23 +413,7 @@ public abstract class CodedInputStream {
     return oldLimit;
   }
 
-
-  private boolean explicitDiscardUnknownFields = false;
-
-  /** TODO(liujisi): flip the default.*/
-  private static volatile boolean proto3DiscardUnknownFieldsDefault = true;
-
-  static void setProto3DiscardUnknownsByDefaultForTest() {
-    proto3DiscardUnknownFieldsDefault = true;
-  }
-
-  static void setProto3KeepUnknownsByDefaultForTest() {
-    proto3DiscardUnknownFieldsDefault = false;
-  }
-
-  static boolean getProto3DiscardUnknownFieldsDefault() {
-    return proto3DiscardUnknownFieldsDefault;
-  }
+  private boolean shouldDiscardUnknownFields = false;
 
   /**
    * Sets this {@code CodedInputStream} to discard unknown fields. Only applies to full runtime
@@ -437,7 +424,7 @@ public abstract class CodedInputStream {
    * runtime.
    */
   final void discardUnknownFields() {
-    explicitDiscardUnknownFields = true;
+    shouldDiscardUnknownFields = true;
   }
 
   /**
@@ -445,7 +432,7 @@ public abstract class CodedInputStream {
    * default.
    */
   final void unsetDiscardUnknownFields() {
-    explicitDiscardUnknownFields = false;
+    shouldDiscardUnknownFields = false;
   }
 
   /**
@@ -453,19 +440,7 @@ public abstract class CodedInputStream {
    * runtime messages.
    */
   final boolean shouldDiscardUnknownFields() {
-    return explicitDiscardUnknownFields;
-  }
-
-  /**
-   * Whether unknown fields in this input stream should be discarded during parsing for proto3 full
-   * runtime messages.
-   *
-   * <p>This function was temporarily introduced before proto3 unknown fields behavior is changed.
-   * TODO(liujisi): remove this and related code in GeneratedMessage after proto3 unknown
-   * fields migration is done.
-   */
-  final boolean shouldDiscardUnknownFieldsProto3() {
-    return explicitDiscardUnknownFields ? true : proto3DiscardUnknownFieldsDefault;
+    return shouldDiscardUnknownFields;
   }
 
   /**
@@ -826,13 +801,9 @@ public abstract class CodedInputStream {
     public String readStringRequireUtf8() throws IOException {
       final int size = readRawVarint32();
       if (size > 0 && size <= (limit - pos)) {
-        // TODO(martinrb): We could save a pass by validating while decoding.
-        if (!Utf8.isValidUtf8(buffer, pos, pos + size)) {
-          throw InvalidProtocolBufferException.invalidUtf8();
-        }
-        final int tempPos = pos;
+        String result = Utf8.decodeUtf8(buffer, pos, size);
         pos += size;
-        return new String(buffer, tempPos, size, UTF_8);
+        return result;
       }
 
       if (size == 0) {
@@ -1525,6 +1496,8 @@ public abstract class CodedInputStream {
       final int size = readRawVarint32();
       if (size > 0 && size <= remaining()) {
         // TODO(nathanmittler): Is there a way to avoid this copy?
+        // TODO(anuraaga): It might be possible to share the optimized loop with
+        // readStringRequireUtf8 by implementing Java replacement logic there.
         // The same as readBytes' logic
         byte[] bytes = new byte[size];
         UnsafeUtil.copyMemory(pos, bytes, 0, size);
@@ -1545,17 +1518,9 @@ public abstract class CodedInputStream {
     @Override
     public String readStringRequireUtf8() throws IOException {
       final int size = readRawVarint32();
-      if (size >= 0 && size <= remaining()) {
-        // TODO(nathanmittler): Is there a way to avoid this copy?
-        // The same as readBytes' logic
-        byte[] bytes = new byte[size];
-        UnsafeUtil.copyMemory(pos, bytes, 0, size);
-        // TODO(martinrb): We could save a pass by validating while decoding.
-        if (!Utf8.isValidUtf8(bytes)) {
-          throw InvalidProtocolBufferException.invalidUtf8();
-        }
-
-        String result = new String(bytes, UTF_8);
+      if (size > 0 && size <= remaining()) {
+        final int bufferPos = bufferPos(pos);
+        String result = Utf8.decodeUtf8(buffer, bufferPos, size);
         pos += size;
         return result;
       }
@@ -2325,11 +2290,7 @@ public abstract class CodedInputStream {
         bytes = readRawBytesSlowPath(size);
         tempPos = 0;
       }
-      // TODO(martinrb): We could save a pass by validating while decoding.
-      if (!Utf8.isValidUtf8(bytes, tempPos, tempPos + size)) {
-        throw InvalidProtocolBufferException.invalidUtf8();
-      }
-      return new String(bytes, tempPos, size, UTF_8);
+      return Utf8.decodeUtf8(bytes, tempPos, size);
     }
 
     @Override
@@ -3349,23 +3310,15 @@ public abstract class CodedInputStream {
     public String readStringRequireUtf8() throws IOException {
       final int size = readRawVarint32();
       if (size > 0 && size <= currentByteBufferLimit - currentByteBufferPos) {
-        byte[] bytes = new byte[size];
-        UnsafeUtil.copyMemory(currentByteBufferPos, bytes, 0, size);
-        if (!Utf8.isValidUtf8(bytes)) {
-          throw InvalidProtocolBufferException.invalidUtf8();
-        }
-        String result = new String(bytes, UTF_8);
+        final int bufferPos = (int) (currentByteBufferPos - currentByteBufferStartPos);
+        String result = Utf8.decodeUtf8(currentByteBuffer, bufferPos, size);
         currentByteBufferPos += size;
         return result;
       }
       if (size >= 0 && size <= remaining()) {
         byte[] bytes = new byte[size];
         readRawBytesTo(bytes, 0, size);
-        if (!Utf8.isValidUtf8(bytes)) {
-          throw InvalidProtocolBufferException.invalidUtf8();
-        }
-        String result = new String(bytes, UTF_8);
-        return result;
+        return Utf8.decodeUtf8(bytes, 0, size);
       }
 
       if (size == 0) {

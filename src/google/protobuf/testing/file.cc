@@ -46,6 +46,7 @@
 #include <errno.h>
 
 #include <google/protobuf/stubs/io_win32.h>
+#include <google/protobuf/stubs/logging.h>
 
 namespace google {
 namespace protobuf {
@@ -57,7 +58,7 @@ namespace protobuf {
 // them like we do below.
 #endif
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 using google::protobuf::internal::win32::access;
 using google::protobuf::internal::win32::chdir;
 using google::protobuf::internal::win32::fopen;
@@ -69,9 +70,9 @@ bool File::Exists(const string& name) {
   return access(name.c_str(), F_OK) == 0;
 }
 
-bool File::ReadFileToString(const string& name, string* output) {
+bool File::ReadFileToString(const string& name, string* output, bool text_mode) {
   char buffer[1024];
-  FILE* file = fopen(name.c_str(), "rb");
+  FILE* file = fopen(name.c_str(), text_mode ? "rt" : "rb");
   if (file == NULL) return false;
 
   while (true) {
